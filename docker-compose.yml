@@ -1,0 +1,58 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: scheduler
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: scheduler
+    ports:
+
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U scheduler -d scheduler"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: .
+    environment:
+      DATABASE_URL: postgresql+psycopg2://scheduler:${POSTGRES_PASSWORD}@db:5432/scheduler
+      # Demo value. In a real deployment this comes from a secret store, and
+      # every API replica must share it or tokens won't validate across them.
+      JWT_SECRET: ${JWT_SECRET:-local-dev-secret-change-me-please-32b}
+      ACCESS_TOKEN_MINUTES: 60
+      LOG_LEVEL: INFO
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+  # Scale this freely: `docker compose up --scale worker=3`.
+  # No leader election, no partitioning - workers just race for the same
+  # queue and the DB decides who wins.
+  worker:
+    build: .
+    environment:
+      DATABASE_URL: postgresql+psycopg2://scheduler:${POSTGRES_PASSWORD}@db:5432/scheduler
+      POLL_INTERVAL_SECONDS: 2
+      BATCH_SIZE: 10
+      WORKER_CONCURRENCY: 4
+      LEASE_SECONDS: 60
+      FAILURE_RATE: 0.3
+      LOG_LEVEL: INFO
+    depends_on:
+      db:
+        condition: service_healthy
+      api:
+        condition: service_started
+    command: python -m app.worker
+    deploy:
+      replicas: 2
+
+volumes:
+  pgdata:
